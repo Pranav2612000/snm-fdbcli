@@ -26,7 +26,7 @@ use hex;
 /// Example:
 ///   export snm_fdbcli_DB_PATH=/usr/local/etc/foundationdb/fdb.cluster
 #[derive(Parser, Debug)]
-#[command(name = "snm-fbcli")]
+#[command(name = "snm-fdbcli")]
 #[command(about = "FoundationDB Directory/Tuple CLI for Srotas", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -252,11 +252,11 @@ async fn cmd_dump_all(db: &Database) -> FdbResult<()> {
 // ---------------------------------------------------------------------
 
 async fn cmd_repl(db: &Database) -> FdbResult<()> {
-    println!("snm-fbcli interactive shell");
+    println!("snm-fdbcli interactive shell");
     println!("Type 'help' for commands, 'quit' or 'exit' to leave.\n");
 
     loop {
-        print!("snm-fbcli> ");
+        print!("snm-fdbcli> ");
         io::stdout().flush().unwrap();
 
         let mut line = String::new();
@@ -421,6 +421,38 @@ async fn cmd_repl(db: &Database) -> FdbResult<()> {
                 }
                 Ok(())
             }
+
+
+            // aliases to feel like fdbcli
+            "pack" => {
+                if args.is_empty() {
+                    println!("Usage: pack (value)");
+                    Ok(())
+                } else {
+                    let tuple_str = args.join(" ");
+                    match tuple_pack_from_string(&tuple_str) {
+                        Ok(bytes) => println!("Hex: {}", hex::encode(bytes)),
+                        Err(e) => println!("Error: {}", e),
+                    }
+                    Ok(())
+                }
+            }
+
+            "unpack" => {
+                if let Some(hexkey) = args.get(0) {
+                    match hex::decode(hexkey) {
+                        Ok(bytes) => match tuple_unpack_to_string(&bytes) {
+                            Ok(s) => println!("Tuple: {}", s),
+                            Err(e) => println!("Error: {}", e),
+                        },
+                        Err(e) => println!("Invalid hex: {:?}", e),
+                    }
+                } else {
+                    println!("Usage: unpack <hex>");
+                }
+                Ok(())
+            }
+
 
             // ------------- Tuple prefix range / delete -------------
             // clearprefix srotas logins (user-1)

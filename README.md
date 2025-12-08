@@ -9,6 +9,14 @@
 
 ![SnmFDBCLI](https://srotas-suite-space.s3.ap-south-1.amazonaws.com/srotas-space.png)
 
+### 🧩 Built on the Official FoundationDB Rust Crate
+
+This project is powered by the official FoundationDB Rust bindings:
+
+```CMD
+foundationdb = { version = "0.10.0", features = ["embedded-fdb-include", "fdb-7_3"] }
+```
+
 
 `snm-fdbcli` is a powerful **FoundationDB Directory/Tuple explorer**, providing:
 
@@ -40,24 +48,13 @@
 - Delete prefix ranges  
 - Dump entire directories  
 
-### Interactive Shell  
-```
-$ snm-fdbcli repl
-snm-fdbcli> dircreate srotas users
-snm-fdbcli> dirlist srotas
-snm-fdbcli> pack (user-1, 1)
-snm-fdbcli> range srotas/users (user-1)
-snm-fdbcli> clearprefix srotas/users (user-1)
-snm-fdbcli> exit
-```
-
 ---
 
 # 📥 Installation
 
 ### Build the CLI
 ```bash
-cargo install --path .
+cargo install snm-fdbcli
 ```
 
 ---
@@ -73,6 +70,29 @@ export SNM_FDBCLI_DB_PATH="/usr/local/etc/foundationdb/fdb.cluster"
 If not set, `Database::default()` is used.
 
 ---
+
+
+### Interactive Shell
+
+```bash
+$ snm-fdbcli repl
+snm-fdbcli> help
+snm-fdbcli> dircreate srotas users
+snm-fdbcli> dirlist
+snm-fdbcli> dirlist srotas
+snm-fdbcli> seed user-1
+snm-fdbcli> show-user user-1
+snm-fdbcli> show-wallet user-1
+snm-fdbcli> logins user-1
+snm-fdbcli> orders user-1
+snm-fdbcli> pack (user-1, 1)
+snm-fdbcli> unpack 0167757365722d31000000000000000100
+snm-fdbcli> range srotas logins (user-1)
+snm-fdbcli> clearprefix srotas logins (user-1)
+snm-fdbcli> dump-all
+snm-fdbcli> exit
+```
+
 
 # 🖥️ CLI Usage
 
