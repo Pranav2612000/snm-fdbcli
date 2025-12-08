@@ -1,0 +1,34 @@
+[package]
+name = "snm-fdbcli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89.0"
+
+authors = ["Snm Maurya <xsmmaurya@gmail.com>"]
+description = "A lightweight FoundationDB CLI and helper library for creating spaces, tuple subspaces, and running structured FDB queries. Designed for development."
+documentation = "https://github.com/srotas-space/snm-fdbcli"
+homepage = "https://github.com/srotas-space/snm-fdbcli"
+repository = "https://github.com/srotas-space/snm-fdbcli"
+readme = "README.md"
+license = "MIT"
+
+keywords = ["foundationdb", "fdb", "tuple", "cli", "database"]
+categories = [
+    "database",
+    "command-line-utilities",
+    "development-tools",
+]
+
+[lib]
+name = "snm_fdbcli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "snm-fdbcli"
+path = "src/bin/snm-fdbcli.rs"
+
+[dependencies]
+foundationdb = { version = "0.10.0", features = ["embedded-fdb-include", "fdb-7_3"] }
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4.3"

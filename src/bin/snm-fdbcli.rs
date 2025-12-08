@@ -1,0 +1,549 @@
+use clap::{Parser, Subcommand};
+use foundationdb::api::FdbApiBuilder;
+use foundationdb::{Database, FdbResult, RangeOption};
+use std::io::{self, Write};
+
+use snm_fdbcli::{
+    connect_db,
+    create_spaces,
+    open_spaces,
+    dump_dir,
+    prefix_range_for_user,
+    dir_create,
+    dir_list,
+    dir_open,
+    tuple_prefix_range,
+    tuple_pack_from_string,
+    tuple_unpack_to_string,
+    tuple_key_from_string,
+};
+
+use hex;
+
+/// FoundationDB playground for srotas/*
+///
+/// Uses env snm_fdbcli_DB_PATH as cluster file path if set.
+/// Example:
+///   export snm_fdbcli_DB_PATH=/usr/local/etc/foundationdb/fdb.cluster
+#[derive(Parser, Debug)]
+#[command(name = "snm-fbcli")]
+#[command(about = "FoundationDB Directory/Tuple CLI for Srotas", long_about = None)]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Create base directories: srotas/users, logins, orders, wallets
+    Init,
+
+    /// Seed a sample user (only when you call it)
+    Seed {
+        /// User id to seed (default: user-1)
+        #[arg(short, long, default_value = "user-1")]
+        user: String,
+    },
+
+    /// Show a user's JSON record
+    ShowUser {
+        user: String,
+    },
+
+    /// Show a user's wallet JSON
+    ShowWallet {
+        user: String,
+    },
+
+    /// Show all logins for a user (tuple range)
+    ShowLogins {
+        user: String,
+    },
+
+    /// Show all orders for a user (tuple range)
+    ShowOrders {
+        user: String,
+    },
+
+    /// Dump all keys in srotas/* (spaces/directories)
+    DumpAll,
+
+    /// Start interactive shell (REPL)
+    Repl,
+}
+
+#[tokio::main]
+async fn main() -> FdbResult<()> {
+    let cli = Cli::parse();
+
+    // Start FDB network
+    let _network = unsafe { FdbApiBuilder::default().build()?.boot()? };
+    let db = connect_db()?;
+
+    match cli.command {
+        Commands::Init => cmd_init(&db).await?,
+        Commands::Seed { user } => cmd_seed(&db, &user).await?,
+        Commands::ShowUser { user } => cmd_show_user(&db, &user).await?,
+        Commands::ShowWallet { user } => cmd_show_wallet(&db, &user).await?,
+        Commands::ShowLogins { user } => cmd_show_logins(&db, &user).await?,
+        Commands::ShowOrders { user } => cmd_show_orders(&db, &user).await?,
+        Commands::DumpAll => cmd_dump_all(&db).await?,
+        Commands::Repl => cmd_repl(&db).await?,
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// Srotas-specific commands
+// ---------------------------------------------------------------------
+
+async fn cmd_init(db: &Database) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let _ = create_spaces(&trx).await; // just create/open
+    trx.commit().await?;
+    println!("✓ Directories created: srotas/users, logins, orders, wallets");
+    Ok(())
+}
+
+async fn cmd_seed(db: &Database, user_id: &str) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let (users_dir, logins_dir, orders_dir, wallets_dir) = create_spaces(&trx).await;
+
+    // user
+    let user_key = users_dir.pack(&(user_id,)).expect("pack user key");
+    let user_val = format!(r#"{{"name":"Alice","id":"{}"}}"#, user_id);
+    trx.set(&user_key, user_val.as_bytes());
+
+    // wallet
+    let wallet_key = wallets_dir.pack(&(user_id,)).expect("pack wallet key");
+    let wallet_val = br#"{"balance":1000,"asset":"USDT"}"#;
+    trx.set(&wallet_key, wallet_val);
+
+    // logins
+    let login1_key = logins_dir
+        .pack(&(user_id, 1_i64))
+        .expect("pack login1 key");
+    trx.set(&login1_key, b"login from chrome");
+
+    let login2_key = logins_dir
+        .pack(&(user_id, 2_i64))
+        .expect("pack login2 key");
+    trx.set(&login2_key, b"login from mobile");
+
+    // order
+    let order_id = "ord-001";
+    let order_key = orders_dir
+        .pack(&(user_id, order_id))
+        .expect("pack order key");
+    let order_val = br#"{"side":"BUY","qty":0.1,"asset":"BTCUSDT"}"#;
+    trx.set(&order_key, order_val);
+
+    trx.commit().await?;
+    println!("✓ Seeded user {}, wallet, 2 logins and 1 order", user_id);
+    Ok(())
+}
+
+async fn cmd_show_user(db: &Database, user_id: &str) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let (users_dir, _, _, _) = open_spaces(&trx).await;
+
+    let user_key = users_dir.pack(&(user_id,)).expect("pack user read key");
+    if let Some(v) = trx.get(&user_key, false).await? {
+        println!(
+            "User {}: {}",
+            user_id,
+            String::from_utf8_lossy(v.as_ref())
+        );
+    } else {
+        println!("User {} not found", user_id);
+    }
+    Ok(())
+}
+
+async fn cmd_show_wallet(db: &Database, user_id: &str) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let (_, _, _, wallets_dir) = open_spaces(&trx).await;
+
+    let wallet_key = wallets_dir
+        .pack(&(user_id,))
+        .expect("pack wallet read key");
+    if let Some(v) = trx.get(&wallet_key, false).await? {
+        println!(
+            "Wallet of {}: {}",
+            user_id,
+            String::from_utf8_lossy(v.as_ref())
+        );
+    } else {
+        println!("Wallet for {} not found", user_id);
+    }
+    Ok(())
+}
+
+async fn cmd_show_logins(db: &Database, user_id: &str) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let (_, logins_dir, _, _) = open_spaces(&trx).await;
+
+    let (begin, end) = prefix_range_for_user(&logins_dir, user_id);
+    let range = RangeOption::from((begin.as_slice(), end.as_slice()));
+    let kvs = trx.get_range(&range, 1000, false).await?;
+
+    println!("Logins for user {}:", user_id);
+    if kvs.is_empty() {
+        println!("  (none)");
+    } else {
+        for kv in kvs.iter() {
+            println!(
+                "  key = {:?}, value = {}",
+                kv.key(),
+                String::from_utf8_lossy(kv.value())
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_show_orders(db: &Database, user_id: &str) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let (_, _, orders_dir, _) = open_spaces(&trx).await;
+
+    let (begin, end) = prefix_range_for_user(&orders_dir, user_id);
+    let range = RangeOption::from((begin.as_slice(), end.as_slice()));
+    let kvs = trx.get_range(&range, 1000, false).await?;
+
+    println!("Orders for user {}:", user_id);
+    if kvs.is_empty() {
+        println!("  (none)");
+    } else {
+        for kv in kvs.iter() {
+            println!(
+                "  key = {:?}, value = {}",
+                kv.key(),
+                String::from_utf8_lossy(kv.value())
+            );
+        }
+    }
+
+    Ok(())
+}
+
+async fn cmd_dump_all(db: &Database) -> FdbResult<()> {
+    let trx = db.create_trx()?;
+    let (users_dir, logins_dir, orders_dir, wallets_dir) = open_spaces(&trx).await;
+
+    println!("=== srotas/users ===");
+    dump_dir(&trx, &users_dir, 1000).await?;
+
+    println!("\n=== srotas/logins ===");
+    dump_dir(&trx, &logins_dir, 1000).await?;
+
+    println!("\n=== srotas/orders ===");
+    dump_dir(&trx, &orders_dir, 1000).await?;
+
+    println!("\n=== srotas/wallets ===");
+    dump_dir(&trx, &wallets_dir, 1000).await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------
+// REPL
+// ---------------------------------------------------------------------
+
+async fn cmd_repl(db: &Database) -> FdbResult<()> {
+    println!("snm-fbcli interactive shell");
+    println!("Type 'help' for commands, 'quit' or 'exit' to leave.\n");
+
+    loop {
+        print!("snm-fbcli> ");
+        io::stdout().flush().unwrap();
+
+        let mut line = String::new();
+        if io::stdin().read_line(&mut line).is_err() {
+            println!();
+            break;
+        }
+
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if line.eq_ignore_ascii_case("quit") || line.eq_ignore_ascii_case("exit") {
+            break;
+        }
+
+        if line.eq_ignore_ascii_case("help") {
+            println!(
+                "Commands:\n\
+                 # Srotas helpers\n\
+                 - init\n\
+                 - seed <user_id>\n\
+                 - show-user <user_id>\n\
+                 - show-wallet <user_id>\n\
+                 - logins <user_id>\n\
+                 - orders <user_id>\n\
+                 - dump-all\n\
+                 \n\
+                 # Directory layer (dynamic)\n\
+                 - dircreate <path...>        # dircreate srotas users\n\
+                 - dirlist [path...]          # dirlist ; dirlist srotas\n\
+                 \n\
+                 # Tuple / key helpers\n\
+                 - keypack (value)            # prints hex\n\
+                 - keyunpack <hex>            # prints (value)\n\
+                 \n\
+                 # Range & delete by tuple prefix\n\
+                 - clearprefix <path...> (tuple)\n\
+                 - range <path...> (tuple)\n\
+                 - delkey <path...> (tuple)   # delete single key\n\
+                 \n\
+                 - help\n\
+                 - quit / exit\n"
+            );
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let cmd = parts[0];
+        let args = &parts[1..];
+
+        let result = match cmd {
+            // ------------- Srotas helpers -------------
+            "init" => cmd_init(db).await,
+            "seed" => {
+                let user = args.get(0).copied().unwrap_or("user-1");
+                cmd_seed(db, user).await
+            }
+            "show-user" => {
+                if let Some(user) = args.get(0) {
+                    cmd_show_user(db, user).await
+                } else {
+                    println!("Usage: show-user <user_id>");
+                    Ok(())
+                }
+            }
+            "show-wallet" => {
+                if let Some(user) = args.get(0) {
+                    cmd_show_wallet(db, user).await
+                } else {
+                    println!("Usage: show-wallet <user_id>");
+                    Ok(())
+                }
+            }
+            "logins" => {
+                if let Some(user) = args.get(0) {
+                    cmd_show_logins(db, user).await
+                } else {
+                    println!("Usage: logins <user_id>");
+                    Ok(())
+                }
+            }
+            "orders" => {
+                if let Some(user) = args.get(0) {
+                    cmd_show_orders(db, user).await
+                } else {
+                    println!("Usage: orders <user_id>");
+                    Ok(())
+                }
+            }
+            "dump-all" => cmd_dump_all(db).await,
+
+            // ------------- Directory commands (dynamic) -------------
+            "dircreate" => {
+                if args.is_empty() {
+                    println!("Usage: dircreate <path...>");
+                    Ok(())
+                } else {
+                    let trx = db.create_trx()?;
+                    let path: Vec<&str> = args.to_vec();
+                    match dir_create(&trx, &path).await {
+                        Ok(_) => {
+                            trx.commit().await?;
+                            println!("✓ Directory created: {:?}", path);
+                        }
+                        Err(e) => println!("Error: {:?}", e),
+                    }
+                    Ok(())
+                }
+            }
+
+            "dirlist" => {
+                let trx = db.create_trx()?;
+                let path: Vec<&str> = args.to_vec();
+                match dir_list(&trx, &path).await {
+                    Ok(children) => {
+                        if path.is_empty() {
+                            println!("Root directories:");
+                        } else {
+                            println!("Directories under {:?}:", path);
+                        }
+                        if children.is_empty() {
+                            println!("  (none)");
+                        } else {
+                            for c in children {
+                                println!("  {}", c);
+                            }
+                        }
+                    }
+                    Err(e) => println!("Error: {:?}", e),
+                }
+                Ok(())
+            }
+
+            // ------------- Tuple pack/unpack (global, not directory-scoped) -------------
+            "keypack" => {
+                if args.is_empty() {
+                    println!("Usage: keypack (value)");
+                    Ok(())
+                } else {
+                    let tuple_str = args.join(" ");
+                    match tuple_pack_from_string(&tuple_str) {
+                        Ok(bytes) => println!("Hex: {}", hex::encode(bytes)),
+                        Err(e) => println!("Error: {}", e),
+                    }
+                    Ok(())
+                }
+            }
+
+            "keyunpack" => {
+                if let Some(hexkey) = args.get(0) {
+                    match hex::decode(hexkey) {
+                        Ok(bytes) => match tuple_unpack_to_string(&bytes) {
+                            Ok(s) => println!("Tuple: {}", s),
+                            Err(e) => println!("Error: {}", e),
+                        },
+                        Err(e) => println!("Invalid hex: {:?}", e),
+                    }
+                } else {
+                    println!("Usage: keyunpack <hex>");
+                }
+                Ok(())
+            }
+
+            // ------------- Tuple prefix range / delete -------------
+            // clearprefix srotas logins (user-1)
+            "clearprefix" => {
+                if args.len() < 2 {
+                    println!("Usage: clearprefix <path...> (tuple)");
+                    Ok(())
+                } else {
+                    let (path_args, tuple_arg) = args.split_at(args.len() - 1);
+                    let tuple_str = tuple_arg[0].to_string();
+                    let path: Vec<&str> = path_args.to_vec();
+
+                    let trx = db.create_trx()?;
+                    let dir = match dir_open(&trx, &path).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            println!("Error opening dir {:?}: {:?}", path, e);
+                            return Ok(());
+                        }
+                    };
+                    let (begin, end) = match tuple_prefix_range(&dir, &tuple_str) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            println!("Tuple parse error: {}", e);
+                            return Ok(());
+                        }
+                    };
+                    trx.clear_range(&begin, &end);
+                    trx.commit().await?;
+                    println!("✓ Cleared prefix {:?} in {:?}", tuple_str, path);
+
+                    Ok(())
+                }
+            }
+
+            // range srotas logins (user-1)
+            "range" => {
+                if args.len() < 2 {
+                    println!("Usage: range <path...> (tuple)");
+                    Ok(())
+                } else {
+                    let (path_args, tuple_arg) = args.split_at(args.len() - 1);
+                    let tuple_str = tuple_arg[0].to_string();
+                    let path: Vec<&str> = path_args.to_vec();
+
+                    let trx = db.create_trx()?;
+                    let dir = match dir_open(&trx, &path).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            println!("Error opening dir {:?}: {:?}", path, e);
+                            return Ok(());
+                        }
+                    };
+                    let (begin, end) = match tuple_prefix_range(&dir, &tuple_str) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            println!("Tuple parse error: {}", e);
+                            return Ok(());
+                        }
+                    };
+                    let range = RangeOption::from((begin.as_slice(), end.as_slice()));
+                    let kvs = trx.get_range(&range, 10_000, false).await?;
+
+                    println!("Range {:?} in {:?}:", tuple_str, path);
+                    if kvs.is_empty() {
+                        println!("  (no keys)");
+                    } else {
+                        for kv in kvs.iter() {
+                            println!(
+                                "  key={}, value={}",
+                                hex::encode(kv.key()),
+                                String::from_utf8_lossy(kv.value())
+                            );
+                        }
+                    }
+                    Ok(())
+                }
+            }
+
+            // delkey srotas users (user-1)
+            "delkey" => {
+                if args.len() < 2 {
+                    println!("Usage: delkey <path...> (tuple)");
+                    Ok(())
+                } else {
+                    let (path_args, tuple_arg) = args.split_at(args.len() - 1);
+                    let tuple_str = tuple_arg[0].to_string();
+                    let path: Vec<&str> = path_args.to_vec();
+
+                    let trx = db.create_trx()?;
+                    let dir = match dir_open(&trx, &path).await {
+                        Ok(d) => d,
+                        Err(e) => {
+                            println!("Error opening dir {:?}: {:?}", path, e);
+                            return Ok(());
+                        }
+                    };
+                    let key = match tuple_key_from_string(&dir, &tuple_str) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            println!("Tuple parse error: {}", e);
+                            return Ok(());
+                        }
+                    };
+                    trx.clear(&key);
+                    trx.commit().await?;
+                    println!("✓ Deleted key {:?} in {:?}", tuple_str, path);
+
+                    Ok(())
+                }
+            }
+
+            other => {
+                println!("Unknown command: {other}. Type 'help' for list.");
+                Ok(())
+            }
+        };
+
+        if let Err(e) = result {
+            eprintln!("Error: {:?}", e);
+        }
+    }
+
+    println!("Bye.");
+    Ok(())
+}
