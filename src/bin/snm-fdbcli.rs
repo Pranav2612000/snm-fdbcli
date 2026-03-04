@@ -15,6 +15,7 @@ use snm_fdbcli::{
     dir_create,
     dir_list,
     dir_open,
+    dir_remove,
     tuple_prefix_range,
     tuple_pack_from_string,
     tuple_unpack_to_string,
@@ -293,6 +294,7 @@ fn print_help() {
          - pwd                        # print current directory\n\
          - dircreate <path...>        # dircreate srotas users\n\
          - dirlist [path...]          # dirlist ; dirlist srotas\n\
+         - rmdir <path...>            # remove directory and its contents\n\
          \n\
          # Tuple / key helpers\n\
          - keypack (value)            # prints hex\n\
@@ -463,6 +465,45 @@ async fn execute_command(
                 Err(e) => println!("Error: {:?}", e),
             }
             Ok(())
+        }
+
+        "rmdir" => {
+            if args.is_empty() {
+                println!("Usage: rmdir <path...>");
+                Ok(())
+            } else {
+                let resolved = resolve_path(current_dir, args);
+
+                // Prevent removing root directory
+                if resolved.is_empty() {
+                    println!("Error: Cannot remove root directory");
+                    return Ok(());
+                }
+
+                // Check if trying to remove current directory or a parent
+                let current_path_str = current_dir.join("/");
+                let resolved_path_str = resolved.join("/");
+                if !current_path_str.is_empty() &&
+                   (current_path_str == resolved_path_str ||
+                    current_path_str.starts_with(&format!("{}/", resolved_path_str))) {
+                    println!("Warning: Removing current directory or its parent. Returning to root.");
+                    current_dir.clear();
+                }
+
+                let trx = db.create_trx()?;
+                let path: Vec<&str> = resolved.iter().map(|s| s.as_str()).collect();
+                match dir_remove(&trx, &path).await {
+                    Ok(true) => {
+                        trx.commit().await?;
+                        println!("✓ Directory removed: /{}", resolved.join("/"));
+                    }
+                    Ok(false) => {
+                        println!("Directory not found: /{}", resolved.join("/"));
+                    }
+                    Err(e) => println!("Error: {:?}", e),
+                }
+                Ok(())
+            }
         }
 
         // ------------- Tuple pack/unpack (global, not directory-scoped) -------------

@@ -175,6 +175,18 @@ pub async fn dir_list(
     Ok(children)
 }
 
+/// Remove a directory at the given path.
+/// This will recursively remove all subdirectories and keys within the directory.
+pub async fn dir_remove(
+    trx: &Transaction,
+    path: &[&str],
+) -> Result<bool, DirectoryError> {
+    let layer = DirectoryLayer::default();
+    let vec_path: Vec<String> = path.iter().map(|s| s.to_string()).collect();
+    let removed = layer.remove(trx, &vec_path).await?;
+    Ok(removed)
+}
+
 // ---- simple tuple support for REPL prefix / pack / unpack ----
 
 /// Very simple tuple parser: expects "(value)" and uses it as a single-string tuple.
